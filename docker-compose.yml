@@ -1,0 +1,19 @@
+services:
+  cad-viewer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cad-viewer
+    container_name: cad-viewer
+    # Host port can be overridden: `PORT=9000 docker compose up`.
+    # The in-container port stays 8000 (serve.py's CMD argument).
+    ports:
+      - "${PORT:-8000}:8000"
+    restart: unless-stopped
+    # Reuses the HEALTHCHECK baked into the image.
+
+    # Optional: expose server-side converted models at /glb. The viewer normally
+    # reads files locally in the browser (file picker / drag & drop), so this is
+    # only useful if you want to serve pre-converted GLBs from the host.
+    # volumes:
+    #   - ./glb:/app/glb:ro

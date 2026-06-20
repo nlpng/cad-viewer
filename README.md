@@ -41,6 +41,23 @@ A small static server is used (rather than opening the file directly) because ES
 modules require `http://`. Model files are read **locally in the browser** — they
 are never uploaded anywhere.
 
+## Run with Docker
+
+The image fetches the vendored libraries during the build, so you don't need to run
+`tools/fetch_vendor.sh` first (it works from a clean clone).
+
+```bash
+# Standalone container
+docker build -t cad-viewer .
+docker run --rm -p 8000:8000 cad-viewer
+
+# …or with Docker Compose
+docker compose up --build
+```
+
+Then open <http://localhost:8000/>. Use a different host port with
+`docker run --rm -p 9000:8000 cad-viewer` or `PORT=9000 docker compose up`.
+
 ## Optional: speed up very large meshes
 
 Big ASCII meshes (e.g. a 130 MB `.dae`) load slowly in the browser. Convert them

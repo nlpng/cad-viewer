@@ -1,0 +1,28 @@
+# Vendored libs are refetched in the build (tools/fetch_vendor.sh) — never ship
+# the local 41 MB copy into the build context.
+vendor/
+
+# Converted model output (tools/convert.py --out defaults to ./glb)
+glb/
+*.glb
+
+# VCS / docker
+.git/
+.gitignore
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
