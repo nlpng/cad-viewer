@@ -1,0 +1,20 @@
+# Third-party libraries — re-fetchable via tools/fetch_vendor.sh
+/vendor/
+
+# Converted model output (tools/convert.py --out defaults to ./glb)
+/glb/
+*.glb
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

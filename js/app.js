@@ -1,0 +1,313 @@
+// app.js — wires the DOM to the scene: folder/file pickers, drag & drop (files
+// and folders), a filterable model list, multi-select assembly loading, the
+// floating toolbar, stats, and loading/empty/error states. No hardcoded paths.
+import { createViewer } from './scene.js';
+import { loadFile, isSupported, extOf } from './loaders.js';
+
+const $ = (id) => document.getElementById(id);
+const viewer = createViewer($('canvas'), $('viewport'));
+
+// ---- state ----
+const allFiles = new Map();      // path -> File (everything, for sibling resolution)
+let models = [];                 // [{ path, file, ext, size }] supported only
+const selected = new Set();      // selected paths (checkboxes)
+let activePath = null;
+let filter = '';
+let loadSeq = 0;
+
+// ---- file ingestion ---------------------------------------------------------
+function ingest(items) {
+  // items: [{ path, file }]
+  let added = 0;
+  for (const { path, file } of items) {
+    if (allFiles.has(path)) continue;
+    allFiles.set(path, file);
+    if (isSupported(file.name)) {
+      models.push({ path, file, ext: extOf(file.name), size: file.size });
+      added++;
+    }
+  }
+  models.sort((a, b) => a.path.localeCompare(b.path, undefined, { numeric: true }));
+  renderList();
+  return added;
+}
+
+function fromInput(input) {
+  return [...input.files].map((f) => ({ path: f.webkitRelativePath || f.name, file: f }));
+}
+
+// Drag & drop, including dropped folders (recursed via webkitGetAsEntry).
+async function fromDataTransfer(dt) {
+  const roots = [...dt.items]
+    .filter((i) => i.kind === 'file')
+    .map((i) => (i.webkitGetAsEntry ? i.webkitGetAsEntry() : null))
+    .filter(Boolean);
+  if (!roots.length) return [...dt.files].map((f) => ({ path: f.name, file: f }));
+  const out = [];
+  await Promise.all(roots.map((e) => walkEntry(e, '', out)));
+  return out;
+}
+function walkEntry(entry, prefix, out) {
+  return new Promise((resolve) => {
+    if (entry.isFile) {
+      entry.file((f) => { out.push({ path: prefix + entry.name, file: f }); resolve(); }, resolve);
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const read = () => reader.readEntries(async (ents) => {
+        if (!ents.length) return resolve();
+        await Promise.all(ents.map((e) => walkEntry(e, `${prefix}${entry.name}/`, out)));
+        read();
+      }, resolve);
+      read();
+    } else resolve();
+  });
+}
+
+// ---- list rendering ---------------------------------------------------------
+function renderList() {
+  const ul = $('file-list');
+  const q = filter.trim().toLowerCase();
+  const shown = q ? models.filter((m) => m.path.toLowerCase().includes(q)) : models;
+
+  $('file-count').textContent = models.length
+    ? `${models.length} model${models.length > 1 ? 's' : ''}${q ? ` · ${shown.length} shown` : ''}`
+    : 'No models loaded';
+  $('clear-list').hidden = models.length === 0;
+
+  ul.innerHTML = '';
+  if (!models.length) {
+    ul.innerHTML = '<li class="empty-list">Open a folder or drop files to begin.</li>';
+    return;
+  }
+  if (!shown.length) {
+    ul.innerHTML = '<li class="empty-list">No models match your filter.</li>';
+    return;
+  }
+
+  for (const m of shown) {
+    const li = document.createElement('li');
+    li.className = m.path === activePath ? 'active' : '';
+
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.className = 'cb'; cb.checked = selected.has(m.path);
+    cb.addEventListener('click', (e) => e.stopPropagation());
+    cb.addEventListener('change', () => {
+      cb.checked ? selected.add(m.path) : selected.delete(m.path);
+      updateSelectionBar();
+    });
+
+    const badge = document.createElement('span');
+    badge.className = 'badge'; badge.textContent = m.ext.toUpperCase();
+
+    const info = document.createElement('div');
+    info.className = 'info';
+    const name = document.createElement('div');
+    name.className = 'name'; name.textContent = baseName(m.path); name.title = m.path;
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = `${dirName(m.path)}${dirName(m.path) ? ' · ' : ''}${human(m.size)}`;
+    info.append(name, meta);
+
+    li.append(cb, badge, info);
+    li.addEventListener('click', () => loadList([m]));
+    ul.appendChild(li);
+  }
+}
+
+function updateSelectionBar() {
+  const bar = $('selection-bar');
+  bar.hidden = selected.size < 1;
+  $('selected-count').textContent = `${selected.size} selected`;
+}
+
+// ---- loading ----------------------------------------------------------------
+async function loadList(list) {
+  if (!list.length) return;
+  const seq = ++loadSeq;
+  showOverlay(true);
+  viewer.clear();
+  activePath = list.length === 1 ? list[0].path : null;
+  renderList();
+
+  const t0 = performance.now();
+  try {
+    for (let i = 0; i < list.length; i++) {
+      const m = list[i];
+      setOverlay(`${baseName(m.path)}${list.length > 1 ? `  (${i + 1}/${list.length})` : ''}`, 0);
+      const obj = await loadFile(m.file, allFiles, (frac) => {
+        if (frac != null) setOverlay(null, frac);
+      });
+      if (seq !== loadSeq) return; // superseded
+      viewer.add(obj, baseName(m.path));
+    }
+    viewer.fitView();
+    buildParts();
+    showStats({
+      name: list.length === 1 ? baseName(list[0].path) : 'Assembly',
+      parts: viewer.parts().length,
+      tris: viewer.triangleCount(),
+      ms: Math.round(performance.now() - t0),
+    });
+    $('empty').classList.add('hidden');
+    $('toolbar').hidden = false;
+    $('stats').hidden = false;
+  } catch (err) {
+    console.error(err);
+    toast(`Could not load: ${err.message || err}`);
+    if (!viewer.parts().length) { $('empty').classList.remove('hidden'); $('stats').hidden = true; }
+  } finally {
+    if (seq === loadSeq) showOverlay(false);
+  }
+}
+
+// ---- parts panel ------------------------------------------------------------
+function getParts() {
+  const top = viewer.parts();
+  if (top.length === 1) {
+    const kids = top[0].children.filter(hasMesh);
+    if (kids.length > 1) return kids;
+  }
+  return top;
+}
+function hasMesh(o) { let f = false; o.traverse((n) => { if (n.isMesh) f = true; }); return f; }
+
+function buildParts() {
+  const parts = getParts();
+  const panel = $('parts-panel');
+  const ul = $('parts-list');
+  ul.innerHTML = '';
+  if (parts.length <= 1) { panel.hidden = true; return; }
+  panel.hidden = false;
+  parts.forEach((part, i) => {
+    const li = document.createElement('li');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = part.visible;
+    cb.addEventListener('change', () => { part.visible = cb.checked; });
+    const sw = document.createElement('span');
+    sw.className = 'swatch'; sw.style.background = partColor(part);
+    const nm = document.createElement('span');
+    nm.className = 'nm';
+    nm.textContent = part.userData.partName || part.name || `part ${i + 1}`;
+    nm.title = nm.textContent;
+    li.append(cb, sw, nm);
+    ul.appendChild(li);
+  });
+}
+function partColor(part) {
+  let css = '#b6bcc4';
+  part.traverse((o) => {
+    if (o.isMesh && o.material) {
+      const m = Array.isArray(o.material) ? o.material[0] : o.material;
+      if (m && m.color) css = `#${m.color.getHexString()}`;
+    }
+  });
+  return css;
+}
+
+// ---- overlay / stats / toast ------------------------------------------------
+function showOverlay(v) {
+  $('overlay').hidden = !v;
+  if (v) setOverlay('Loading…', 0);
+}
+function setOverlay(name, frac) {
+  if (name != null) $('overlay-name').textContent = name;
+  if (frac != null) {
+    $('overlay-bar').style.width = `${Math.round(frac * 100)}%`;
+    $('overlay-pct').textContent = frac > 0 ? `${Math.round(frac * 100)}%` : '';
+  }
+}
+function showStats({ name, parts, tris, ms }) {
+  $('stats').innerHTML =
+    `<b>${escapeHtml(name)}</b><span class="dot"></span>${parts} part${parts > 1 ? 's' : ''}` +
+    `<span class="dot"></span>${tris.toLocaleString()} tris` +
+    `<span class="dot"></span>${ms} ms`;
+}
+let toastTimer;
+function toast(msg) {
+  const el = $('toast');
+  el.textContent = msg; el.hidden = false;
+  requestAnimationFrame(() => el.classList.add('show'));
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.classList.remove('show'); setTimeout(() => (el.hidden = true), 250); }, 4200);
+}
+
+// ---- helpers ----------------------------------------------------------------
+const baseName = (p) => p.split('/').pop();
+const dirName = (p) => { const i = p.lastIndexOf('/'); return i < 0 ? '' : p.slice(0, i); };
+function human(n) {
+  if (n < 1024) return `${n} B`;
+  const u = ['KB', 'MB', 'GB']; let i = -1;
+  do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+  return `${n.toFixed(1)} ${u[i]}`;
+}
+function escapeHtml(s) { return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+// ---- wiring -----------------------------------------------------------------
+$('btn-open-folder').addEventListener('click', () => $('folder-input').click());
+$('empty-open-folder').addEventListener('click', () => $('folder-input').click());
+$('btn-open-files').addEventListener('click', () => $('file-input').click());
+$('empty-open-files').addEventListener('click', () => $('file-input').click());
+
+$('folder-input').addEventListener('change', (e) => {
+  const added = ingest(fromInput(e.target));
+  if (!added) toast('No supported model files found in that folder.');
+  e.target.value = '';
+});
+$('file-input').addEventListener('change', (e) => {
+  const items = fromInput(e.target);
+  const added = ingest(items);
+  e.target.value = '';
+  // if exactly one model was opened, load it immediately
+  const loadable = items.filter((i) => isSupported(i.file.name));
+  if (loadable.length === 1) loadList([models.find((m) => m.path === loadable[0].path)].filter(Boolean));
+  else if (!added) toast('No supported model files selected.');
+});
+
+$('search').addEventListener('input', (e) => { filter = e.target.value; renderList(); });
+$('clear-list').addEventListener('click', () => {
+  models = []; allFiles.clear(); selected.clear(); activePath = null;
+  renderList(); updateSelectionBar();
+});
+$('load-selected').addEventListener('click', () => {
+  const list = models.filter((m) => selected.has(m.path));
+  if (list.length) loadList(list);
+});
+
+// drag & drop over the whole viewport
+const vp = $('viewport');
+let dragDepth = 0;
+vp.addEventListener('dragenter', (e) => { e.preventDefault(); if (dragDepth++ === 0) $('drop-veil').hidden = false; });
+vp.addEventListener('dragover', (e) => { e.preventDefault(); });
+vp.addEventListener('dragleave', (e) => { e.preventDefault(); if (--dragDepth <= 0) { dragDepth = 0; $('drop-veil').hidden = true; } });
+vp.addEventListener('drop', async (e) => {
+  e.preventDefault(); dragDepth = 0; $('drop-veil').hidden = true;
+  const items = await fromDataTransfer(e.dataTransfer);
+  const before = models.length;
+  ingest(items);
+  const newModels = models.slice(); // already merged
+  const dropped = items.filter((i) => isSupported(i.file.name));
+  if (!dropped.length) { toast('No supported model files dropped.'); return; }
+  // load: single dropped file -> view it; multiple -> assemble them
+  const toLoad = dropped
+    .map((d) => newModels.find((m) => m.path === d.path || m.path === d.file.name))
+    .filter(Boolean);
+  if (toLoad.length) loadList(toLoad);
+  else if (models.length === before) toast('Those files are already loaded.');
+});
+
+// toolbar
+function tbToggle(btn, fn) {
+  btn.addEventListener('click', () => { const on = btn.classList.toggle('is-on'); fn(on); });
+}
+$('tb-fit').addEventListener('click', () => viewer.fitView());
+tbToggle($('tb-wire'), (on) => viewer.setWireframe(on));
+tbToggle($('tb-grid'), (on) => viewer.setGrid(on));
+tbToggle($('tb-axes'), (on) => viewer.setAxes(on));
+$('tb-bg').addEventListener('input', (e) => viewer.setBackground(e.target.value));
+
+// keyboard: F = fit
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'f' && !/input|textarea/i.test(e.target.tagName)) viewer.fitView();
+});
+
+renderList();
