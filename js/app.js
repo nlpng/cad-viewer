@@ -86,15 +86,20 @@ function renderList() {
 
   for (const m of shown) {
     const li = document.createElement('li');
-    li.className = m.path === activePath ? 'active' : '';
 
     const cb = document.createElement('input');
     cb.type = 'checkbox'; cb.className = 'cb'; cb.checked = selected.has(m.path);
-    cb.addEventListener('click', (e) => e.stopPropagation());
+    cb.setAttribute('aria-label', `Select ${baseName(m.path)}`);
     cb.addEventListener('change', () => {
-      cb.checked ? selected.add(m.path) : selected.delete(m.path);
+      if (cb.checked) selected.add(m.path);
+      else selected.delete(m.path);
       updateSelectionBar();
     });
+
+    // The whole row is a button so it is keyboard-focusable and Enter/Space-activatable.
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = m.path === activePath ? 'row active' : 'row';
 
     const badge = document.createElement('span');
     badge.className = 'badge'; badge.textContent = m.ext.toUpperCase();
@@ -108,8 +113,9 @@ function renderList() {
     meta.textContent = `${dirName(m.path)}${dirName(m.path) ? ' · ' : ''}${human(m.size)}`;
     info.append(name, meta);
 
-    li.append(cb, badge, info);
-    li.addEventListener('click', () => loadList([m]));
+    row.append(badge, info);
+    row.addEventListener('click', () => loadList([m]));
+    li.append(cb, row);
     ul.appendChild(li);
   }
 }
@@ -148,13 +154,13 @@ async function loadList(list) {
       tris: viewer.triangleCount(),
       ms: Math.round(performance.now() - t0),
     });
-    $('empty').classList.add('hidden');
+    $('empty').hidden = true;
     $('toolbar').hidden = false;
     $('stats').hidden = false;
   } catch (err) {
     console.error(err);
     toast(`Could not load: ${err.message || err}`);
-    if (!viewer.parts().length) { $('empty').classList.remove('hidden'); $('stats').hidden = true; }
+    if (!viewer.parts().length) { $('empty').hidden = false; $('stats').hidden = true; }
   } finally {
     if (seq === loadSeq) showOverlay(false);
   }
@@ -283,13 +289,12 @@ vp.addEventListener('drop', async (e) => {
   e.preventDefault(); dragDepth = 0; $('drop-veil').hidden = true;
   const items = await fromDataTransfer(e.dataTransfer);
   const before = models.length;
-  ingest(items);
-  const newModels = models.slice(); // already merged
+  ingest(items); // merges the dropped items into `models`
   const dropped = items.filter((i) => isSupported(i.file.name));
   if (!dropped.length) { toast('No supported model files dropped.'); return; }
   // load: single dropped file -> view it; multiple -> assemble them
   const toLoad = dropped
-    .map((d) => newModels.find((m) => m.path === d.path || m.path === d.file.name))
+    .map((d) => models.find((m) => m.path === d.path || m.path === d.file.name))
     .filter(Boolean);
   if (toLoad.length) loadList(toLoad);
   else if (models.length === before) toast('Those files are already loaded.');
@@ -297,7 +302,11 @@ vp.addEventListener('drop', async (e) => {
 
 // toolbar
 function tbToggle(btn, fn) {
-  btn.addEventListener('click', () => { const on = btn.classList.toggle('is-on'); fn(on); });
+  btn.addEventListener('click', () => {
+    const on = btn.classList.toggle('is-on');
+    btn.setAttribute('aria-pressed', String(on));
+    fn(on);
+  });
 }
 $('tb-fit').addEventListener('click', () => viewer.fitView());
 tbToggle($('tb-wire'), (on) => viewer.setWireframe(on));

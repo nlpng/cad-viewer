@@ -11,8 +11,7 @@ export function createViewer(canvas, viewportEl) {
   renderer.toneMappingExposure = 1.05;
 
   const scene = new THREE.Scene();
-  let bgColor = new THREE.Color(0x0e1116);
-  scene.background = bgColor;
+  scene.background = new THREE.Color(0x0e1116);
 
   const camera = new THREE.PerspectiveCamera(50, 1, 0.01, 10000);
   camera.position.set(6, 4, 8);
@@ -108,9 +107,8 @@ export function createViewer(canvas, viewportEl) {
     axes.scale.setScalar(maxDim * 0.4);
   }
 
-  // public toggles
+  // public API consumed by app.js
   const api = {
-    scene, root, camera, controls,
     clear,
     add,
     fitView,
@@ -119,7 +117,7 @@ export function createViewer(canvas, viewportEl) {
     setWireframe(v) { wireframe = v; applyWireframeTo(root); },
     setGrid(v) { grid.visible = v; },
     setAxes(v) { axes.visible = v; },
-    setBackground(hex) { bgColor = new THREE.Color(hex); scene.background = bgColor; },
+    setBackground(hex) { scene.background = new THREE.Color(hex); },
   };
 
   // resize + render loop
