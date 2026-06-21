@@ -141,24 +141,50 @@ function meshFromGeometry(geo) {
 }
 
 // ---- STEP / IGES via occt-import-js (OpenCascade WASM) ----------------------
-let occtPromise = null;
-function loadOcctModule() {
-  if (occtPromise) return occtPromise;
-  occtPromise = new Promise((resolve, reject) => {
-    const tag = document.createElement('script');
-    tag.src = `${VENDOR}/occt/dist/occt-import-js.js`;
-    tag.onload = () =>
-      window.occtimportjs({ locateFile: (p) => `${VENDOR}/occt/dist/${p}` }).then(resolve).catch(reject);
-    tag.onerror = () => reject(new Error('Failed to load occt-import-js'));
-    document.head.appendChild(tag);
+// Parsing runs in the vendored classic worker so it never blocks the main
+// thread. The worker accepts { format, buffer, params } and posts back the same
+// { success, meshes } object the synchronous API returns. Its own locateFile
+// resolves the .wasm relative to the worker URL (vendor/occt/dist/).
+const OCCT_WORKER = `${VENDOR}/occt/dist/occt-import-js-worker.js`;
+let occtWorker = null;
+let occtChain = Promise.resolve(); // serialize requests over the single worker
+
+function getOcctWorker() {
+  if (!occtWorker) occtWorker = new Worker(OCCT_WORKER);
+  return occtWorker;
+}
+
+// Parse `bytes` (Uint8Array) in the worker. Serialized so concurrent callers
+// don't clash over the single worker's message channel. The buffer is
+// transferred to avoid a copy (the caller does not reuse it afterwards).
+function parseOcct(bytes, format) {
+  const run = () => new Promise((resolve, reject) => {
+    const worker = getOcctWorker();
+    const onMessage = (ev) => { cleanup(); resolve(ev.data); };
+    const onError = (err) => {
+      cleanup();
+      // A worker error can leave it in a bad state — drop it so the next load
+      // starts a fresh worker.
+      occtWorker = null;
+      reject(new Error(`occt-import-js worker failed: ${err.message || err}`));
+    };
+    const cleanup = () => {
+      worker.removeEventListener('message', onMessage);
+      worker.removeEventListener('error', onError);
+    };
+    worker.addEventListener('message', onMessage);
+    worker.addEventListener('error', onError);
+    worker.postMessage({ format, buffer: bytes, params: null }, [bytes.buffer]);
   });
-  return occtPromise;
+  // Chain so failures don't break the queue for subsequent loads.
+  const result = occtChain.then(run, run);
+  occtChain = result.catch(() => {});
+  return result;
 }
 
 async function loadOcct(bytes, ext) {
-  const occt = await loadOcctModule();
-  const isStep = ext === 'stp' || ext === 'step';
-  const result = isStep ? occt.ReadStepFile(bytes, null) : occt.ReadIgesFile(bytes, null);
+  const format = ext === 'stp' || ext === 'step' ? 'step' : 'iges';
+  const result = await parseOcct(bytes, format);
   if (!result || !result.success) throw new Error('OpenCascade failed to read the file');
 
   const group = new THREE.Group();

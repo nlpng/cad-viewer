@@ -224,6 +224,15 @@ button { font-family: inherit; }
 .overlay-name { font-size: 13.5px; color: var(--text); max-width: 70%; text-align: center; }
 .progress { width: 260px; height: 5px; border-radius: 999px; background: rgba(255,255,255,0.10); overflow: hidden; }
 .progress-bar { height: 100%; width: 0; background: var(--accent-grad); border-radius: 999px; transition: width .15s ease; }
+/* Indeterminate state for loaders with no progress events (occt STEP/IGES). */
+.progress.indeterminate .progress-bar {
+  width: 40%; transition: none;
+  animation: indeterminate 1.1s ease-in-out infinite;
+}
+@keyframes indeterminate {
+  0%   { transform: translateX(-110%); }
+  100% { transform: translateX(360%); }
+}
 .overlay-pct { font-size: 11px; color: var(--muted); }
 
 .toast {

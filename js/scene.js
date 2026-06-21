@@ -64,6 +64,7 @@ export function createViewer(canvas, viewportEl) {
         });
       });
     }
+    requestRender();
   }
 
   function add(object3d, name) {
@@ -71,6 +72,7 @@ export function createViewer(canvas, viewportEl) {
     object3d.userData.partName = name || object3d.name;
     applyWireframeTo(object3d);
     root.add(object3d);
+    requestRender();
     return object3d;
   }
 
@@ -116,6 +118,7 @@ export function createViewer(canvas, viewportEl) {
     const g = Math.max(maxDim * 2, 1);
     grid.scale.setScalar(g / 40);
     axes.scale.setScalar(maxDim * 0.4);
+    requestRender();
   }
 
   // public API consumed by app.js
@@ -125,29 +128,46 @@ export function createViewer(canvas, viewportEl) {
     fitView,
     triangleCount,
     parts: () => root.children,
-    setWireframe(v) { wireframe = v; applyWireframeTo(root); },
-    setGrid(v) { grid.visible = v; },
-    setAxes(v) { axes.visible = v; },
-    setBackground(hex) { scene.background = new THREE.Color(hex); },
+    invalidate: requestRender, // request a redraw after an external scene mutation
+    setWireframe(v) { wireframe = v; applyWireframeTo(root); requestRender(); },
+    setGrid(v) { grid.visible = v; requestRender(); },
+    setAxes(v) { axes.visible = v; requestRender(); },
+    setBackground(hex) { scene.background = new THREE.Color(hex); requestRender(); },
   };
 
-  // resize + render loop
+  // ---- on-demand rendering ----
+  // Render only when the view actually changes (model loaded, a toggle, orbiting,
+  // resize) instead of every frame. OrbitControls.update() returns true while the
+  // camera is still settling (damping), so we keep scheduling frames until it stops.
+  let renderPending = false;
+  function frame() {
+    renderPending = false;
+    const moving = controls.update();
+    renderer.render(scene, camera);
+    if (moving) requestRender();
+  }
+  function requestRender() {
+    if (!renderPending) {
+      renderPending = true;
+      requestAnimationFrame(frame);
+    }
+  }
+  controls.addEventListener('start', requestRender);
+  controls.addEventListener('change', requestRender);
+
   function resize() {
     const w = viewportEl.clientWidth || 1;
     const h = viewportEl.clientHeight || 1;
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
+    requestRender();
   }
   const ro = new ResizeObserver(resize);
   ro.observe(viewportEl);
   resize();
 
-  (function animate() {
-    requestAnimationFrame(animate);
-    controls.update();
-    renderer.render(scene, camera);
-  })();
+  requestRender(); // initial draw
 
   return api;
 }

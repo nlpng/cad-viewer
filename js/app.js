@@ -22,6 +22,12 @@ try {
   throw err; // stop wiring up an unusable viewer
 }
 
+// Extensions parsed off-thread with no progress events (occt-import-js).
+const OCCT_EXTS = new Set(['stp', 'step', 'igs', 'iges']);
+// Drops larger than this (or any folder drop) populate the list instead of
+// auto-assembling everything into one model.
+const ASSEMBLE_DROP_MAX = 8;
+
 // ---- state ----
 const allFiles = new Map();      // path -> File (everything, for sibling resolution)
 let models = [];                 // [{ path, file, ext, size }] supported only
@@ -52,15 +58,20 @@ function fromInput(input) {
 }
 
 // Drag & drop, including dropped folders (recursed via webkitGetAsEntry).
+// Returns { items, hadDirectory } — hadDirectory is true if any dropped root was
+// a folder, so the caller can list-only instead of auto-assembling everything.
 async function fromDataTransfer(dt) {
   const roots = [...dt.items]
     .filter((i) => i.kind === 'file')
     .map((i) => (i.webkitGetAsEntry ? i.webkitGetAsEntry() : null))
     .filter(Boolean);
-  if (!roots.length) return [...dt.files].map((f) => ({ path: f.name, file: f }));
+  if (!roots.length) {
+    return { items: [...dt.files].map((f) => ({ path: f.name, file: f })), hadDirectory: false };
+  }
+  const hadDirectory = roots.some((e) => e.isDirectory);
   const out = [];
   await Promise.all(roots.map((e) => walkEntry(e, '', out)));
-  return out;
+  return { items: out, hadDirectory };
 }
 function walkEntry(entry, prefix, out) {
   return new Promise((resolve) => {
@@ -155,9 +166,14 @@ async function loadList(list) {
     for (let i = 0; i < list.length; i++) {
       const m = list[i];
       setOverlay(`${baseName(m.path)}${list.length > 1 ? `  (${i + 1}/${list.length})` : ''}`, 0);
+      // STEP/IGES parse off-thread with no progress events — show a moving
+      // indeterminate bar instead of a stalled 0%.
+      const indeterminate = OCCT_EXTS.has(m.ext);
+      setOverlayIndeterminate(indeterminate);
       const obj = await loadFile(m.file, allFiles, (frac) => {
         if (frac != null) setOverlay(null, frac);
       });
+      setOverlayIndeterminate(false);
       if (seq !== loadSeq) return; // superseded
       viewer.add(obj, baseName(m.path));
     }
@@ -203,7 +219,7 @@ function buildParts() {
     const li = document.createElement('li');
     const cb = document.createElement('input');
     cb.type = 'checkbox'; cb.checked = part.visible;
-    cb.addEventListener('change', () => { part.visible = cb.checked; });
+    cb.addEventListener('change', () => { part.visible = cb.checked; viewer.invalidate(); });
     const sw = document.createElement('span');
     sw.className = 'swatch'; sw.style.background = partColor(part);
     const nm = document.createElement('span');
@@ -229,12 +245,23 @@ function partColor(part) {
 function showOverlay(v) {
   $('overlay').hidden = !v;
   if (v) setOverlay('Loading…', 0);
+  else setOverlayIndeterminate(false);
 }
 function setOverlay(name, frac) {
   if (name != null) $('overlay-name').textContent = name;
   if (frac != null) {
     $('overlay-bar').style.width = `${Math.round(frac * 100)}%`;
     $('overlay-pct').textContent = frac > 0 ? `${Math.round(frac * 100)}%` : '';
+  }
+}
+// Toggle a continuously-animated bar for loaders that report no progress (occt).
+function setOverlayIndeterminate(on) {
+  const bar = document.querySelector('.progress');
+  if (!bar) return;
+  bar.classList.toggle('indeterminate', on);
+  if (on) {
+    $('overlay-bar').style.width = '';
+    $('overlay-pct').textContent = '';
   }
 }
 function showStats({ name, parts, tris, ms }) {
@@ -302,11 +329,21 @@ vp.addEventListener('dragover', (e) => { e.preventDefault(); });
 vp.addEventListener('dragleave', (e) => { e.preventDefault(); if (--dragDepth <= 0) { dragDepth = 0; $('drop-veil').hidden = true; } });
 vp.addEventListener('drop', async (e) => {
   e.preventDefault(); dragDepth = 0; $('drop-veil').hidden = true;
-  const items = await fromDataTransfer(e.dataTransfer);
+  const { items, hadDirectory } = await fromDataTransfer(e.dataTransfer);
   const before = models.length;
   ingest(items); // merges the dropped items into `models`
   const dropped = items.filter((i) => isSupported(i.file.name));
   if (!dropped.length) { toast('No supported model files dropped.'); return; }
+
+  // A dropped folder (or a large batch) populates the list rather than fusing
+  // everything into one surprise assembly. A small drop of loose files still
+  // loads immediately (drag-one-to-view, .obj+.mtl, a few parts).
+  if (hadDirectory || dropped.length > ASSEMBLE_DROP_MAX) {
+    if (models.length === before) toast('Those files are already loaded.');
+    else toast(`Added ${dropped.length} models — click one to view, or tick several and Load together.`);
+    return;
+  }
+
   // load: single dropped file -> view it; multiple -> assemble them
   const toLoad = dropped
     .map((d) => models.find((m) => m.path === d.path || m.path === d.file.name))
