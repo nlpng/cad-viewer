@@ -5,7 +5,22 @@ import { createViewer } from './scene.js';
 import { loadFile, isSupported, extOf } from './loaders.js';
 
 const $ = (id) => document.getElementById(id);
-const viewer = createViewer($('canvas'), $('viewport'));
+
+let viewer;
+try {
+  viewer = createViewer($('canvas'), $('viewport'));
+} catch (err) {
+  console.error(err);
+  const card = document.querySelector('.empty-card');
+  if (card) {
+    card.innerHTML =
+      '<h2>3D view unavailable</h2>' +
+      '<p>This browser could not start WebGL. Try enabling hardware ' +
+      'acceleration or using a different browser.</p>';
+  }
+  $('empty').hidden = false;
+  throw err; // stop wiring up an unusable viewer
+}
 
 // ---- state ----
 const allFiles = new Map();      // path -> File (everything, for sibling resolution)

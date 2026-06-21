@@ -101,7 +101,9 @@ export async function loadFile(file, fileMap = null, onProgress = null) {
         const objLoader = new OBJLoader(manager);
         const mtl = findSibling(fileMap, file.name, 'mtl');
         if (mtl) {
-          const mats = await new MTLLoader(manager).loadAsync(URL.createObjectURL(mtl));
+          const mtlURL = URL.createObjectURL(mtl);
+          urls.push(mtlURL);
+          const mats = await new MTLLoader(manager).loadAsync(mtlURL);
           mats.preload();
           objLoader.setMaterials(mats);
         }

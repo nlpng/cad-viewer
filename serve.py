@@ -6,9 +6,13 @@ Serves this self-contained `cad-viewer/` directory (index.html, vendored libs,
 and the converted models in models/). Adds correct MIME types for .wasm and
 .glb. Threaded so multiple part files download in parallel.
 
+Binds to 127.0.0.1 by default so the server is not exposed to the local network.
+Set HOST=0.0.0.0 to listen on all interfaces (the Docker image does this).
+
 Usage:
     python3 serve.py            # http://localhost:8000/
     python3 serve.py 9000       # custom port
+    HOST=0.0.0.0 python3 serve.py   # listen on all interfaces
 """
 from __future__ import annotations
 
@@ -53,10 +57,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 def main() -> int:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
+    host = os.environ.get("HOST", "127.0.0.1")
     socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.ThreadingTCPServer(("", port), partial(Handler)) as httpd:
-        url = f"http://localhost:{port}/"
-        print(f"Serving {ROOT}")
+    with socketserver.ThreadingTCPServer((host, port), partial(Handler)) as httpd:
+        display_host = "localhost" if host in ("127.0.0.1", "0.0.0.0", "") else host
+        url = f"http://{display_host}:{port}/"
+        print(f"Serving {ROOT} on {host}")
         print(f"CAD viewer:  {url}")
         print("Press Ctrl+C to stop.")
         try:

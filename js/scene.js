@@ -4,7 +4,14 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 export function createViewer(canvas, viewportEl) {
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+  let renderer;
+  try {
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+  } catch (err) {
+    // No WebGL context (unsupported / disabled / blocked) — surface a clear error
+    // so the caller can show a message instead of a silently blank canvas.
+    throw new Error('WebGL is not available in this browser', { cause: err });
+  }
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -50,7 +57,11 @@ export function createViewer(canvas, viewportEl) {
       root.remove(child);
       child.traverse((o) => {
         if (o.geometry) o.geometry.dispose();
-        if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => m.dispose());
+        if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => {
+          // material.dispose() does NOT free attached textures — dispose them too.
+          for (const k in m) { const v = m[k]; if (v && v.isTexture) v.dispose(); }
+          m.dispose();
+        });
       });
     }
   }

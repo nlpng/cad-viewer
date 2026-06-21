@@ -43,8 +43,12 @@ USER appuser
 
 EXPOSE 8000
 
-# serve.py binds to all interfaces and derives its root from __file__, so it runs
-# unchanged in the container. No curl in the runtime image, so probe with Python.
+# serve.py defaults to 127.0.0.1; inside the container it must listen on all
+# interfaces to be reachable from the host's published port.
+ENV HOST=0.0.0.0
+
+# serve.py derives its root from __file__, so it runs unchanged in the container.
+# No curl in the runtime image, so probe with Python.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD ["python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/', timeout=4).status == 200 else 1)"]
 
