@@ -234,6 +234,7 @@ button { font-family: inherit; }
   100% { transform: translateX(360%); }
 }
 .overlay-pct { font-size: 11px; color: var(--muted); }
+#overlay-cancel { margin-top: 4px; }
 
 .toast {
   position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%) translateY(10px);
