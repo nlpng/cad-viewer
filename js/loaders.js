@@ -74,12 +74,13 @@ function siblingManager(fileMap, urls) {
 //   file       : the File to load
 //   fileMap    : optional Map<relativePath, File> of siblings (multi-file formats)
 //   onProgress : optional (fraction 0..1 | null) callback
-export async function loadFile(file, fileMap = null, onProgress = null) {
+//   signal     : optional AbortSignal (honored by the STEP/IGES worker path)
+export async function loadFile(file, fileMap = null, onProgress = null, signal = null) {
   const ext = extOf(file.name);
   const urls = [];
   try {
     if (ext === 'stp' || ext === 'step' || ext === 'igs' || ext === 'iges') {
-      return await loadOcct(new Uint8Array(await file.arrayBuffer()), ext);
+      return await loadOcct(new Uint8Array(await file.arrayBuffer()), ext, signal);
     }
 
     const manager = siblingManager(fileMap, urls);
@@ -146,6 +147,12 @@ function meshFromGeometry(geo) {
 // { success, meshes } object the synchronous API returns. Its own locateFile
 // resolves the .wasm relative to the worker URL (vendor/occt/dist/).
 const OCCT_WORKER = `${VENDOR}/occt/dist/occt-import-js-worker.js`;
+// The worker's ReadFile is synchronous and blocks the worker event loop, so the
+// only way to stop a runaway parse (malformed/huge file) is to terminate the
+// worker. This watchdog bounds how long we wait before doing exactly that.
+// Generous so a legitimately large-but-valid STEP isn't killed — oversized files
+// are warned about separately by the caller's large-file guard.
+const OCCT_TIMEOUT_MS = 180000;
 let occtWorker = null;
 let occtChain = Promise.resolve(); // serialize requests over the single worker
 
@@ -154,26 +161,53 @@ function getOcctWorker() {
   return occtWorker;
 }
 
+// Kill the current worker so the next load respawns a clean one. Used whenever a
+// worker is in an unknown state: errored, timed out, or aborted mid-parse.
+function dropOcctWorker(worker) {
+  try { worker.terminate(); } catch { /* already gone */ }
+  if (occtWorker === worker) occtWorker = null;
+}
+
 // Parse `bytes` (Uint8Array) in the worker. Serialized so concurrent callers
 // don't clash over the single worker's message channel. The buffer is
 // transferred to avoid a copy (the caller does not reuse it afterwards).
-function parseOcct(bytes, format) {
+//   opts.signal    : optional AbortSignal to cancel the (synchronous) parse
+//   opts.timeoutMs : watchdog after which the worker is terminated (default above)
+function parseOcct(bytes, format, { signal, timeoutMs = OCCT_TIMEOUT_MS } = {}) {
   const run = () => new Promise((resolve, reject) => {
+    // The request may have sat queued behind another while the caller cancelled.
+    if (signal?.aborted) return reject(new DOMException('Aborted', 'AbortError'));
+
     const worker = getOcctWorker();
+    let timer;
     const onMessage = (ev) => { cleanup(); resolve(ev.data); };
     const onError = (err) => {
       cleanup();
       // A worker error can leave it in a bad state — drop it so the next load
       // starts a fresh worker.
-      occtWorker = null;
+      dropOcctWorker(worker);
       reject(new Error(`occt-import-js worker failed: ${err.message || err}`));
     };
+    const onAbort = () => {
+      cleanup();
+      dropOcctWorker(worker); // can't interrupt the synchronous parse otherwise
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    const onTimeout = () => {
+      cleanup();
+      dropOcctWorker(worker);
+      reject(new Error('Timed out reading this file — it may be too large or malformed.'));
+    };
     const cleanup = () => {
+      clearTimeout(timer);
       worker.removeEventListener('message', onMessage);
       worker.removeEventListener('error', onError);
+      signal?.removeEventListener('abort', onAbort);
     };
+    timer = setTimeout(onTimeout, timeoutMs);
     worker.addEventListener('message', onMessage);
     worker.addEventListener('error', onError);
+    signal?.addEventListener('abort', onAbort);
     worker.postMessage({ format, buffer: bytes, params: null }, [bytes.buffer]);
   });
   // Chain so failures don't break the queue for subsequent loads.
@@ -182,9 +216,9 @@ function parseOcct(bytes, format) {
   return result;
 }
 
-async function loadOcct(bytes, ext) {
+async function loadOcct(bytes, ext, signal) {
   const format = ext === 'stp' || ext === 'step' ? 'step' : 'iges';
-  const result = await parseOcct(bytes, format);
+  const result = await parseOcct(bytes, format, { signal });
   if (!result || !result.success) throw new Error('OpenCascade failed to read the file');
 
   const group = new THREE.Group();

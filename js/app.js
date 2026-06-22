@@ -27,6 +27,9 @@ const OCCT_EXTS = new Set(['stp', 'step', 'igs', 'iges']);
 // Drops larger than this (or any folder drop) populate the list instead of
 // auto-assembling everything into one model.
 const ASSEMBLE_DROP_MAX = 8;
+// STEP/IGES are read fully into memory and tessellated in-browser; warn before
+// committing to a file big enough to stall or OOM the tab.
+const OCCT_MAX_SOFT_BYTES = 250 * 1024 * 1024;
 
 // ---- state ----
 const allFiles = new Map();      // path -> File (everything, for sibling resolution)
@@ -35,6 +38,7 @@ const selected = new Set();      // selected paths (checkboxes)
 let activePath = null;
 let filter = '';
 let loadSeq = 0;
+let currentController = null;    // AbortController for the in-flight load (cancel)
 
 // ---- file ingestion ---------------------------------------------------------
 function ingest(items) {
@@ -155,7 +159,13 @@ function updateSelectionBar() {
 // ---- loading ----------------------------------------------------------------
 async function loadList(list) {
   if (!list.length) return;
+  if (!confirmLargeOcct(list)) return;
   const seq = ++loadSeq;
+  // Abort any still-running parse before starting a new one, then arm a fresh
+  // controller the Cancel button (and timeout) can trip.
+  currentController?.abort();
+  const controller = new AbortController();
+  currentController = controller;
   showOverlay(true);
   viewer.clear();
   activePath = list.length === 1 ? list[0].path : null;
@@ -172,7 +182,7 @@ async function loadList(list) {
       setOverlayIndeterminate(indeterminate);
       const obj = await loadFile(m.file, allFiles, (frac) => {
         if (frac != null) setOverlay(null, frac);
-      });
+      }, controller.signal);
       setOverlayIndeterminate(false);
       if (seq !== loadSeq) return; // superseded
       viewer.add(obj, baseName(m.path));
@@ -189,12 +199,28 @@ async function loadList(list) {
     $('toolbar').hidden = false;
     $('stats').hidden = false;
   } catch (err) {
-    console.error(err);
-    toast(`Could not load: ${err.message || err}`);
-    if (!viewer.parts().length) { $('empty').hidden = false; $('stats').hidden = true; }
+    // A deliberate cancel (or a supersede) is not an error — stay quiet.
+    if (!(controller.signal.aborted || err?.name === 'AbortError')) {
+      console.error(err);
+      toast(`Could not load: ${err.message || err}`);
+      if (!viewer.parts().length) { $('empty').hidden = false; $('stats').hidden = true; }
+    }
   } finally {
     if (seq === loadSeq) showOverlay(false);
+    if (currentController === controller) currentController = null;
   }
+}
+
+// Warn once before loading a STEP/IGES file big enough to stall or crash the
+// tab. Returns false if the user declines (load should not proceed).
+function confirmLargeOcct(list) {
+  const big = list.find((m) => OCCT_EXTS.has(m.ext) && m.size > OCCT_MAX_SOFT_BYTES);
+  if (!big) return true;
+  return window.confirm(
+    `${baseName(big.path)} is ${human(big.size)}. STEP/IGES files are read entirely ` +
+    `into memory and tessellated in-browser, which may take a while or freeze the ` +
+    `tab. Load it anyway?`
+  );
 }
 
 // ---- parts panel ------------------------------------------------------------
@@ -365,6 +391,14 @@ tbToggle($('tb-wire'), (on) => viewer.setWireframe(on));
 tbToggle($('tb-grid'), (on) => viewer.setGrid(on));
 tbToggle($('tb-axes'), (on) => viewer.setAxes(on));
 $('tb-bg').addEventListener('input', (e) => viewer.setBackground(e.target.value));
+
+// cancel an in-flight load (terminates a runaway STEP/IGES worker)
+$('overlay-cancel').addEventListener('click', () => {
+  currentController?.abort();
+  loadSeq++;            // supersede any pending result the abort can't reach
+  showOverlay(false);
+  toast('Load cancelled.');
+});
 
 // keyboard: F = fit
 window.addEventListener('keydown', (e) => {
